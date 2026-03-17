@@ -1,0 +1,1480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0a1a0f" />
+  <title>Caddie</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a1a0f; font-family: Georgia, serif; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    nav::-webkit-scrollbar { display: none; }
+    #loading { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; color:#4ade80; font-family:Georgia,serif; gap:16px; }
+    #loading-text { font-size:1.1rem; }
+    #loading-sub { font-size:0.75rem; color:#4b5563; }
+    #error-msg { font-size:0.8rem; color:#ef4444; max-width:300px; text-align:center; display:none; padding:0 20px; }
+    .spinner { width:32px; height:32px; border:3px solid rgba(74,222,128,0.2); border-top-color:#4ade80; border-radius:50%; animation:spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="loading">
+      <div style="font-size:3rem">&#9971;</div>
+      <div class="spinner"></div>
+      <div id="loading-text">Loading Caddie...</div>
+      <div id="loading-sub">First load may take a moment</div>
+      <div id="error-msg"></div>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.10/babel.min.js"></script>
+
+  <script>
+    try { firebase.initializeApp({
+      apiKey: "AIzaSyBBU-bBTjbG203MdExQVQbxdHqkcfu5LIg",
+      authDomain: "caddie-golf-tracker.firebaseapp.com",
+      databaseURL: "https://caddie-golf-tracker-default-rtdb.firebaseio.com/",
+      projectId: "caddie-golf-tracker",
+      storageBucket: "caddie-golf-tracker.firebasestorage.app",
+      messagingSenderId: "358480288484",
+      appId: "1:358480288484:web:be3d7e05d894ed668deaf1"
+    }); } catch(e) { console.error(e); }
+  </script>
+
+  <script>
+    function showError(msg) {
+      document.getElementById('loading-text').textContent = 'Failed to load';
+      var el = document.getElementById('error-msg');
+      el.style.display = 'block';
+      el.textContent = msg;
+      console.error('App error:', msg);
+    }
+
+    window.addEventListener('load', function() {
+      requestAnimationFrame(function() {
+        setTimeout(function() {
+          try {
+            document.getElementById('loading-text').textContent = 'Compiling...';
+            var src = document.getElementById('app-source').textContent;
+            var compiled = Babel.transform(src, {
+              presets: [['react', { runtime: 'classic' }]],
+              filename: 'app.jsx',
+              compact: true
+            }).code;
+            var s = document.createElement('script');
+            s.onerror = function(e) { showError('Script error: ' + e.message); };
+            s.textContent = compiled + '\nwindow.__App = GolfTracker;';
+            document.head.appendChild(s);
+            if (!window.__App) throw new Error('Component not found');
+            ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(window.__App));
+          } catch(e) {
+            showError(e.message);
+          }
+        }, 100);
+      });
+    });
+  </script>
+
+  <script type="text/plain" id="app-source">
+const { useState, useEffect, useCallback } = React;
+const { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } = Recharts;
+
+const STORAGE_KEY = "golf-tracker-rounds";
+const COURSES_KEY = "golf-tracker-courses";
+
+const defaultHoles = Array.from({ length: 18 }, (_, i) => ({
+  hole: i + 1,
+  par: i % 3 === 0 ? 3 : i % 3 === 1 ? 4 : 5,
+  score: null,
+}));
+const default9Holes = Array.from({ length: 9 }, (_, i) => ({
+  hole: i + 1,
+  par: i % 3 === 0 ? 3 : i % 3 === 1 ? 4 : 5,
+  score: null,
+}));
+
+function classifyScore(score, par) {
+  const diff = score - par;
+  if (score === 1) return "ace";
+  if (diff <= -2) return "eagle";
+  if (diff === -1) return "birdie";
+  if (diff === 0) return "par";
+  if (diff === 1) return "bogey";
+  if (diff === 2) return "double";
+  return "triple+";
+}
+
+const SCORE_COLORS = {
+  ace: "#FFD700", eagle: "#A855F7", birdie: "#22C55E",
+  par: "#e8f0e9", bogey: "#F97316", double: "#EF4444", "triple+": "#7F1D1D",
+};
+const SCORE_LABELS = {
+  ace: "Ace", eagle: "Eagle", birdie: "Birdie",
+  par: "Par", bogey: "Bogey", double: "Double", "triple+": "Triple+",
+};
+const SCORE_EMOJI = { ace: "🏆", eagle: "🦅", birdie: "🐦", par: "", bogey: "", double: "", "triple+": "" };
+
+// Golf scorecard symbols
+// ace: gold star, eagle: double circle, birdie: single circle,
+// par: plain, bogey: single square, double: double square, triple+: triple square
+function ScoreSymbol({ score, par, size = 36, showScore = true }) {
+  if (score === null || score === undefined) return null;
+  const type = classifyScore(score, par);
+
+  const s = size;
+  const half = s / 2;
+  const stroke = s <= 24 ? 1.5 : 2;
+
+  const textStyle = {
+    fontSize: s * 0.38,
+    fontWeight: 800,
+    fontFamily: "Georgia, serif",
+    fill: type === "ace" ? "#0a1a0f" : type === "triple+" ? "#fff" : "#e8f0e9",
+  };
+
+  if (type === "ace") {
+    // Gold filled double circle with star feel
+    return (
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        <circle cx={half} cy={half} r={half - stroke} fill="#FFD700" stroke="#FFD700" strokeWidth={stroke} />
+        <circle cx={half} cy={half} r={half - stroke * 3.5} fill="none" stroke="#0a1a0f" strokeWidth={stroke * 0.8} />
+        {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle}>{score}</text>}
+      </svg>
+    );
+  }
+  if (type === "eagle") {
+    // Double circle, purple
+    return (
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        <circle cx={half} cy={half} r={half - stroke} fill="none" stroke="#A855F7" strokeWidth={stroke} />
+        <circle cx={half} cy={half} r={half - stroke * 3.5} fill="none" stroke="#A855F7" strokeWidth={stroke} />
+        {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle} fill="#A855F7">{score}</text>}
+      </svg>
+    );
+  }
+  if (type === "birdie") {
+    // Single circle, green
+    return (
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        <circle cx={half} cy={half} r={half - stroke} fill="none" stroke="#22C55E" strokeWidth={stroke} />
+        {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle} fill="#22C55E">{score}</text>}
+      </svg>
+    );
+  }
+  if (type === "par") {
+    // Plain — no shape
+    return (
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle} fill="#e8f0e9">{score}</text>}
+      </svg>
+    );
+  }
+  if (type === "bogey") {
+    // Single square, orange
+    const pad = stroke + 1;
+    return (
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        <rect x={pad} y={pad} width={s - pad * 2} height={s - pad * 2} rx={3} fill="none" stroke="#F97316" strokeWidth={stroke} />
+        {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle} fill="#F97316">{score}</text>}
+      </svg>
+    );
+  }
+  if (type === "double") {
+    // Double square, red
+    const pad1 = stroke + 1;
+    const pad2 = stroke * 3.5;
+    return (
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        <rect x={pad1} y={pad1} width={s - pad1 * 2} height={s - pad1 * 2} rx={3} fill="none" stroke="#EF4444" strokeWidth={stroke} />
+        <rect x={pad2} y={pad2} width={s - pad2 * 2} height={s - pad2 * 2} rx={2} fill="none" stroke="#EF4444" strokeWidth={stroke} />
+        {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle} fill="#EF4444">{score}</text>}
+      </svg>
+    );
+  }
+  // triple+ — triple square, dark red
+  const p1 = stroke + 0.5, p2 = stroke * 2.8, p3 = stroke * 5;
+  return (
+    <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+      <rect x={p1} y={p1} width={s - p1 * 2} height={s - p1 * 2} rx={3} fill="none" stroke="#b91c1c" strokeWidth={stroke} />
+      <rect x={p2} y={p2} width={s - p2 * 2} height={s - p2 * 2} rx={2} fill="none" stroke="#b91c1c" strokeWidth={stroke} />
+      <rect x={p3} y={p3} width={s - p3 * 2} height={s - p3 * 2} rx={1} fill="none" stroke="#b91c1c" strokeWidth={stroke} />
+      {showScore && <text x={half} y={half + s * 0.14} textAnchor="middle" {...textStyle} fill="#b91c1c">{score}</text>}
+    </svg>
+  );
+}
+
+function ScoreBadge({ type }) {
+  return (
+    <span style={{
+      background: type === "par" ? "rgba(255,255,255,0.1)" : SCORE_COLORS[type],
+      color: type === "ace" ? "#000" : type === "par" ? "#e8f0e9" : "#fff",
+      fontSize: "0.62rem", fontWeight: 700,
+      padding: "2px 7px", borderRadius: "999px",
+      letterSpacing: "0.04em", textTransform: "uppercase",
+    }}>
+      {SCORE_EMOJI[type]}{SCORE_LABELS[type]}
+    </span>
+  );
+}
+
+function calcHandicap(rounds) {
+  if (rounds.length < 3) return null;
+  const diffs = rounds.map((r) => {
+    const s = r.holes.reduce((a, h) => a + (Number(h.score) || 0), 0);
+    const p = r.holes.reduce((a, h) => a + h.par, 0);
+    return s - p;
+  });
+  const sorted = [...diffs].sort((a, b) => a - b);
+  const take = Math.min(Math.floor(rounds.length * 0.4 + 1), 10);
+  const best = sorted.slice(0, take);
+  return (best.reduce((a, b) => a + b, 0) / best.length).toFixed(1);
+}
+
+const inputStyle = {
+  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(74,222,128,0.2)",
+  borderRadius: 8, color: "#e8f0e9", padding: "9px 14px", fontSize: "0.9rem",
+  fontFamily: "Georgia, serif", outline: "none",
+};
+
+const selectStyle = {
+  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.2)",
+  borderRadius: 8, color: "#e8f0e9", fontSize: "1rem",
+  fontFamily: "Georgia, serif", outline: "none", cursor: "pointer",
+  padding: "8px 2px", width: "100%", textAlign: "center", fontWeight: 600,
+};
+
+// ── IN-GAME TRACKER ──────────────────────────────────────────────
+function ActiveRoundTracker({ holes, setHoles, courseName, roundDate, onFinish, onCancel }) {
+  const [currentHole, setCurrentHole] = useState(0);
+
+  const h = holes[currentHole];
+  const scored = holes.filter((h) => h.score !== null);
+  const totalScore = scored.reduce((s, h) => s + h.score, 0);
+  const totalPar = scored.reduce((s, h) => s + h.par, 0);
+  const toPar = totalScore - totalPar;
+  const type = h.score !== null ? classifyScore(h.score, h.par) : null;
+
+  const adjust = (delta) => {
+    setHoles((prev) => {
+      const updated = [...prev];
+      const cur = updated[currentHole];
+      const newScore = cur.score === null ? cur.par + delta : Math.max(1, cur.score + delta);
+      updated[currentHole] = { ...cur, score: newScore };
+      return updated;
+    });
+  };
+
+  const setScore = (val) => {
+    setHoles((prev) => {
+      const updated = [...prev];
+      updated[currentHole] = { ...updated[currentHole], score: Math.max(1, val) };
+      return updated;
+    });
+  };
+
+  const goNext = () => {
+    if (currentHole < holes.length - 1) setCurrentHole(currentHole + 1);
+  };
+
+  const goPrev = () => { if (currentHole > 0) setCurrentHole(currentHole - 1); };
+
+  const scoreColor = type ? SCORE_COLORS[type] : "#3a5a42";
+  const relLabel = h.score !== null
+    ? (h.score - h.par === 0 ? "E" : h.score - h.par > 0 ? `+${h.score - h.par}` : `${h.score - h.par}`)
+    : "—";
+  const anyScored = holes.some((h) => h.score !== null);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(160deg, #0a1a0f 0%, #0d2318 40%, #071510 100%)", fontFamily: "Georgia, serif", color: "#e8f0e9", display: "flex", flexDirection: "column" }}>
+      {/* Top bar */}
+      <div style={{ background: "rgba(0,0,0,0.35)", backdropFilter: "blur(10px)", borderBottom: "1px solid rgba(74,222,128,0.15)", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#d1fae5" }}>{courseName || "Round in Progress"}</div>
+          <div style={{ fontSize: "0.72rem", color: "#4b5563", marginTop: 1 }}>{roundDate}</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: "1.4rem", fontWeight: 800, color: toPar < 0 ? "#4ade80" : toPar === 0 ? "#9ca3af" : "#f97316", lineHeight: 1 }}>
+              {scored.length > 0 ? (toPar === 0 ? "E" : toPar > 0 ? `+${toPar}` : toPar) : "—"}
+            </div>
+            <div style={{ fontSize: "0.6rem", color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.06em" }}>To Par</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: "1.4rem", fontWeight: 800, color: "#9ca3af", lineHeight: 1 }}>{scored.length > 0 ? totalScore : "—"}</div>
+            <div style={{ fontSize: "0.6rem", color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.06em" }}>Total</div>
+          </div>
+          <button onClick={onCancel} style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.1)", color: "#6b7280", padding: "5px 12px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.75rem" }}>Quit</button>
+        </div>
+      </div>
+
+      {/* Hole progress dots */}
+      <div style={{ padding: "12px 20px 6px", display: "flex", gap: 4, justifyContent: "center", flexWrap: "wrap" }}>
+        {holes.map((hh, i) => {
+          const isScored = hh.score !== null;
+          const isActive = i === currentHole;
+          const t = isScored ? classifyScore(hh.score, hh.par) : null;
+          return (
+            <button key={i} onClick={() => setCurrentHole(i)} style={{
+              width: isActive ? 28 : 20, height: 20, borderRadius: 999,
+              background: isActive ? "#4ade80" : isScored ? SCORE_COLORS[t] : "rgba(255,255,255,0.08)",
+              border: isActive ? "none" : "none",
+              cursor: "pointer", transition: "all 0.18s",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: "0.55rem", color: isActive ? "#0a1a0f" : "#fff", fontWeight: 700,
+            }}>
+              {isActive ? h.hole : ""}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Main hole card */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 24px 24px" }}>
+        <div style={{ width: "100%", maxWidth: 400 }}>
+
+          {/* Hole header */}
+          <div style={{ textAlign: "center", marginBottom: 28 }}>
+            <div style={{ fontSize: "0.75rem", color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>Hole</div>
+            <div style={{ fontSize: "4rem", fontWeight: 800, color: "#f0fdf4", lineHeight: 1 }}>{h.hole}</div>
+            <div style={{ fontSize: "1rem", color: "#6b7280", marginTop: 4 }}>Par {h.par}</div>
+          </div>
+
+          {/* Score display with symbol */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 24, marginBottom: 16 }}>
+            <button onClick={() => adjust(-1)} style={{
+              width: 64, height: 64, borderRadius: "50%",
+              background: "rgba(255,255,255,0.06)", border: "2px solid rgba(255,255,255,0.12)",
+              color: "#e8f0e9", fontSize: "2rem", fontWeight: 300, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+            }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.12)"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.06)"}
+            >−</button>
+
+            <div style={{ textAlign: "center", minWidth: 110, display: "flex", flexDirection: "column", alignItems: "center" }}>
+              <ScoreSymbol score={h.score !== null ? h.score : h.par} par={h.par} size={96} showScore={true} />
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, minHeight: 22 }}>
+                <span style={{ fontSize: "0.95rem", color: type ? SCORE_COLORS[type] : "#4b5563", fontWeight: 700 }}>{h.score !== null ? relLabel : "—"}</span>
+                {type && <ScoreBadge type={type} />}
+              </div>
+            </div>
+
+            <button onClick={() => adjust(1)} style={{
+              width: 64, height: 64, borderRadius: "50%",
+              background: "rgba(255,255,255,0.06)", border: "2px solid rgba(255,255,255,0.12)",
+              color: "#e8f0e9", fontSize: "2rem", fontWeight: 300, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+            }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.12)"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.06)"}
+            >+</button>
+          </div>
+
+          {/* Quick-tap scores */}
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
+            {[h.par - 2, h.par - 1, h.par, h.par + 1, h.par + 2].filter((v) => v >= 1).map((v) => {
+              const t = classifyScore(v, h.par);
+              const isActive = h.score === v;
+              return (
+                <button key={v} onClick={() => setScore(v)} style={{
+                  width: 48, height: 48, borderRadius: 10, padding: 0,
+                  background: isActive ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.04)",
+                  border: isActive ? `2px solid ${SCORE_COLORS[t]}` : "1px solid rgba(255,255,255,0.08)",
+                  cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.12s",
+                }}>
+                  <ScoreSymbol score={v} par={h.par} size={34} showScore={true} />
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Clear score */}
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 20 }}>
+            <button
+              onClick={() => {
+                const updated = [...holes];
+                updated[currentHole] = { ...updated[currentHole], score: null };
+                setHoles(updated);
+              }}
+              disabled={h.score === null}
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 8, padding: "5px 18px",
+                color: h.score === null ? "#2d4a35" : "#6b7280",
+                fontFamily: "inherit", fontSize: "0.78rem",
+                cursor: h.score === null ? "default" : "pointer",
+                transition: "all 0.15s",
+              }}
+            >✕ Clear Score</button>
+          </div>
+
+          {/* Nav */}
+          <div style={{ display: "flex", gap: 12 }}>
+            <button onClick={goPrev} disabled={currentHole === 0} style={{
+              flex: 1, padding: "13px", borderRadius: 12,
+              background: currentHole === 0 ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.07)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              color: currentHole === 0 ? "#2d4a35" : "#9ca3af",
+              fontFamily: "inherit", fontSize: "0.9rem", cursor: currentHole === 0 ? "default" : "pointer",
+            }}>← Prev</button>
+
+            {currentHole < holes.length - 1 ? (
+              <button onClick={goNext} style={{
+                flex: 2, padding: "13px", borderRadius: 12,
+                background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)",
+                color: "#4ade80", fontFamily: "inherit", fontSize: "0.9rem", fontWeight: 700, cursor: "pointer",
+              }}>
+                {h.score === null ? "Skip & Next →" : "Next Hole →"}
+              </button>
+            ) : (
+              <button onClick={() => setTimeout(onFinish, 50)} style={{
+                flex: 2, padding: "13px", borderRadius: 12,
+                background: "linear-gradient(135deg, #4ade80, #22c55e)", border: "none",
+                color: "#0a1a0f", fontFamily: "inherit", fontSize: "0.95rem", fontWeight: 800, cursor: "pointer",
+              }}>Finish Round ✓</button>
+            )}
+          </div>
+
+          {/* Mini scorecard */}
+          {scored.length > 0 && (
+            <div style={{ marginTop: 24, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(74,222,128,0.08)", borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ padding: "8px 14px", fontSize: "0.65rem", color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.08em", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>Scorecard</div>
+              {[holes.slice(0, 9), holes.slice(9, 18)].map((nine, ni) => (
+                <div key={ni} style={{ display: "grid", gridTemplateColumns: "repeat(9, 1fr)", gap: 2, padding: ni === 0 ? "8px 8px 2px" : "2px 8px 8px" }}>
+                  {nine.map((hh, i) => {
+                    const idx = ni * 9 + i;
+                    const isActive = idx === currentHole;
+                    return (
+                      <div key={idx} onClick={() => setCurrentHole(idx)} style={{ textAlign: "center", cursor: "pointer", background: isActive ? "rgba(74,222,128,0.1)" : "transparent", borderRadius: 4, padding: "2px 0" }}>
+                        <div style={{ fontSize: "0.52rem", color: "#4b5563", marginBottom: 1 }}>{hh.hole}</div>
+                        <div style={{ display: "flex", justifyContent: "center" }}>
+                          {hh.score !== null
+                            ? <ScoreSymbol score={hh.score} par={hh.par} size={22} showScore={true} />
+                            : <span style={{ fontSize: "0.7rem", color: "#2d4a35", lineHeight: "22px" }}>·</span>
+                          }
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {anyScored && currentHole < holes.length - 1 && (
+            <button onClick={onFinish} style={{ width: "100%", marginTop: 12, padding: "12px", borderRadius: 12, background: "linear-gradient(135deg, #4ade80, #22c55e)", border: "none", color: "#0a1a0f", fontFamily: "inherit", fontSize: "0.9rem", fontWeight: 800, cursor: "pointer" }}>
+              Finish Round ✓
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ─────────────────────────────────────────────────────
+function GolfTracker() {
+  const [rounds, setRounds] = useState([]);
+  const [courses, setCourses] = useState([]);
+  const [dbReady, setDbReady] = useState(false);
+  const [view, setView] = useState("dashboard");
+  const [activeRound, setActiveRound] = useState(null);
+  const [editingRound, setEditingRound] = useState(false);
+  const [editedHoles, setEditedHoles] = useState([]);
+  const [holes, setHoles] = useState(defaultHoles);
+  const [courseName, setCourseName] = useState("");
+  const [roundDate, setRoundDate] = useState(new Date().toISOString().split("T")[0]);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [editingCourseId, setEditingCourseId] = useState(null);
+  const [courseSaved, setCourseSaved] = useState(false);
+  const [setupMode, setSetupMode] = useState('pick'); // 'pick' | 'new'
+  const [courseLocation, setCourseLocation] = useState('');
+  const [newCourseHoles, setNewCourseHoles] = useState(18);
+  const [inRound, setInRound] = useState(false);
+
+  const toArray = (val) => {
+    if (!val) return [];
+    if (Array.isArray(val)) return val;
+    return Object.values(val);
+  };
+
+  const saveRounds = useCallback((r) => { setRounds(r); }, []);
+
+  const persistCourses = (c) => {
+    setCourses(c);
+    try { firebase.database().ref('courses').set(c); } catch(e) { console.error(e); }
+  };
+
+  useEffect(() => {
+    try {
+      firebase.database().ref('rounds').on('value', snap => {
+        const val = snap.val();
+        if (!val) { setRounds([]); return; }
+        const arr = toArray(val).map(r => ({ ...r, holes: toArray(r.holes) }));
+        setRounds(arr);
+      });
+      firebase.database().ref('courses').on('value', snap => {
+        const val = snap.val();
+        if (!val) { setCourses([]); setDbReady(true); return; }
+        const arr = toArray(val).map(c => ({ ...c, holes: toArray(c.holes) }));
+        setCourses(arr);
+        setDbReady(true);
+      });
+    } catch(e) { console.error('Firebase error:', e); setDbReady(true); }
+    return () => {
+      try { firebase.database().ref('rounds').off(); firebase.database().ref('courses').off(); } catch(e) {}
+    };
+  }, []);
+
+  const persistRounds = (r) => {
+    saveRounds(r);
+    try { firebase.database().ref('rounds').set(r); } catch(e) { console.error(e); }
+  };
+
+  const matchedCourse = courses.find(
+    (c) => c.name.toLowerCase().trim() === courseName.toLowerCase().trim()
+  );
+
+  const loadCourse = (course) => {
+    setCourseName(course.name);
+    setCourseLocation(course.location || '');
+    setHoles(course.holes.map((h) => ({ ...h, score: null })));
+    setDropdownOpen(false);
+    setCourseSaved(false);
+  };
+
+  const saveCurrentCourse = () => {
+    if (!courseName.trim()) return;
+    const pars = holes.map((h) => ({ hole: h.hole, par: h.par }));
+    const existing = courses.find((c) => c.name.toLowerCase().trim() === courseName.toLowerCase().trim());
+    if (existing) {
+      persistCourses(courses.map((c) => c.id === existing.id ? { ...c, holes: pars, location: courseLocation.trim() } : c));
+    } else {
+      persistCourses([...courses, { id: Date.now(), name: courseName.trim(), location: courseLocation.trim(), holes: pars }]);
+    }
+    setCourseSaved(true);
+    setTimeout(() => setCourseSaved(false), 2000);
+  };
+
+  const deleteCourse = (id) => persistCourses(courses.filter((c) => c.id !== id));
+
+  const startRound = () => {
+    if (courseName.trim()) {
+      const pars = holes.map((h) => ({ hole: h.hole, par: h.par }));
+      const existing = courses.find((c) => c.name.toLowerCase().trim() === courseName.toLowerCase().trim());
+      if (existing) {
+        persistCourses(courses.map((c) => c.id === existing.id ? { ...c, holes: pars, location: courseLocation.trim() } : c));
+      } else {
+        persistCourses([...courses, { id: Date.now(), name: courseName.trim(), location: courseLocation.trim(), holes: pars }]);
+      }
+    }
+    setHoles((prev) => prev.map((h) => ({ ...h, score: null })));
+    setInRound(true);
+  };
+
+  const finishRound = () => {
+    const filled = holes.filter((h) => h.score !== null);
+    if (filled.length === 0) return;
+    const newRound = {
+      id: Date.now(),
+      course: courseName || "Unknown Course",
+      date: roundDate,
+      totalHoles: holes.length,
+      holesPlayed: filled.length,
+      holes: filled.map((h) => ({ hole: h.hole, par: h.par, score: h.score })),
+    };
+    persistRounds([newRound, ...rounds]);
+    setHoles(defaultHoles);
+    setCourseName("");
+    setInRound(false);
+    setView("dashboard");
+  };
+
+  const cancelRound = () => {
+    setInRound(false);
+    setHoles((prev) => prev.map((h) => ({ ...h, score: null })));
+  };
+
+  const deleteRound = (id) => {
+    persistRounds(rounds.filter((r) => r.id !== id));
+    if (activeRound?.id === id) { setActiveRound(null); setView("history"); }
+  };
+
+  // Split rounds by type
+  const roundHistory = rounds.map((r) => {
+    const total = r.holes.reduce((s, h) => s + (Number(h.score) || 0), 0);
+    const par = r.holes.reduce((s, h) => s + h.par, 0);
+    const holesPlayed = r.holesPlayed ?? r.holes.length;
+    return { ...r, total, toPar: total - par, holesPlayed };
+  });
+
+  const fullRoundHistory = roundHistory.filter((r) => {
+    const total = r.totalHoles ?? (r.holesPlayed === 9 && r.holes.every(h => h.hole <= 9) ? 9 : 18);
+    return total === 18 && r.holesPlayed === 18;
+  });
+  const fullRounds = rounds.filter((r) => {
+    const played = r.holesPlayed ?? r.holes.length;
+    const total = r.totalHoles ?? (played === 9 && r.holes.every(h => h.hole <= 9) ? 9 : 18);
+    return total === 18 && played === 18;
+  });
+
+  // 18-hole stats only
+  const allHoles = fullRounds.flatMap((r) => r.holes);
+  const scoreCounts = { ace: 0, eagle: 0, birdie: 0, par: 0, bogey: 0, double: 0, "triple+": 0 };
+  // Count score types from ALL rounds (18-hole and 9-hole)
+  rounds.forEach((r) => {
+    r.holes.forEach((h) => {
+      if (h.score && !isNaN(Number(h.score))) scoreCounts[classifyScore(Number(h.score), h.par)]++;
+    });
+  });
+  // allScoreCounts includes every round for display purposes
+  const allScoreCounts = scoreCounts;
+
+  const avgScoreByHole = Array.from({ length: 18 }, (_, i) => {
+    const holeNum = i + 1;
+    const hd = fullRounds.flatMap((r) => r.holes).filter((h) => h.hole === holeNum && h.score && !isNaN(Number(h.score)));
+    const avg = hd.length ? hd.reduce((s, h) => s + Number(h.score), 0) / hd.length : null;
+    const par = hd[0]?.par || defaultHoles[i].par;
+    return { hole: holeNum, avg: avg ? parseFloat(avg.toFixed(2)) : null, par };
+  });
+
+  const handicap = calcHandicap(fullRounds);
+  const bestRound = fullRoundHistory.length ? fullRoundHistory.reduce((a, b) => a.toPar < b.toPar ? a : b) : null;
+  const avgScore = fullRoundHistory.length ? (fullRoundHistory.reduce((s, r) => s + r.total, 0) / fullRoundHistory.length).toFixed(1) : null;
+  const historyChartData = [...fullRoundHistory].reverse().slice(-10).map((r, i) => ({
+    name: `R${i + 1}`, score: r.total, toPar: r.toPar, course: r.course,
+  }));
+
+  // 9-hole stats — any partial round with 9+ holes (but < 18), plus front/back splits from full rounds
+  // Detect back-9-only rounds (all holes >= 10) and score them accordingly
+  const nineHoleRounds = roundHistory.filter((r) => r.holesPlayed >= 9 && r.holesPlayed < 18);
+  const partialNineRounds = nineHoleRounds.map((r) => {
+    const allBack = r.holes.every((h) => h.hole > 9);
+    const isTrue9HoleCourse = r.holes.length === 9 && r.holes[0]?.hole === 1; // True 9-hole course (holes 1-9)
+    const relevantHoles = allBack ? r.holes : r.holes.slice(0, 9);
+    const score = relevantHoles.reduce((s, h) => s + h.score, 0);
+    const par = relevantHoles.reduce((s, h) => s + h.par, 0);
+    const label = allBack ? "Back 9" : isTrue9HoleCourse ? "9-Hole Course" : "Partial";
+    return { course: r.course, date: r.date, score, toPar: score - par, nine: label, holesPlayed: r.holesPlayed };
+  });
+  // Front 9 and back 9 from full rounds
+  const front9FromFull = fullRoundHistory.map((r) => {
+    const h = r.holes.filter((h) => h.hole <= 9);
+    const score = h.reduce((s, h) => s + h.score, 0);
+    const par = h.reduce((s, h) => s + h.par, 0);
+    return { course: r.course, date: r.date, score, toPar: score - par, nine: "Front" };
+  });
+  const back9FromFull = fullRoundHistory.map((r) => {
+    const h = r.holes.filter((h) => h.hole > 9);
+    const score = h.reduce((s, h) => s + h.score, 0);
+    const par = h.reduce((s, h) => s + h.par, 0);
+    return { course: r.course, date: r.date, score, toPar: score - par, nine: "Back" };
+  });
+  // Also include standalone partial rounds that are clearly front or back 9
+  const front9FromPartial = partialNineRounds.filter((r) => r.nine === "Partial" || r.nine === "9-Hole Course");
+  const back9FromPartial = partialNineRounds.filter((r) => r.nine === "Back 9");
+  const front9Scores = [...front9FromFull, ...front9FromPartial];
+  const back9Scores = [...back9FromFull, ...back9FromPartial];
+  const all9Entries = [
+    ...partialNineRounds,
+    ...front9Scores,
+    ...back9Scores,
+  ];
+  const best9 = all9Entries.length ? all9Entries.reduce((a, b) => a.toPar < b.toPar ? a : b) : null;
+  const avg9Score = all9Entries.length ? (all9Entries.reduce((s, r) => s + r.score, 0) / all9Entries.length).toFixed(1) : null;
+  const nine9ScoreCounts = { ace: 0, eagle: 0, birdie: 0, par: 0, bogey: 0, double: 0, "triple+": 0 };
+  nineHoleRounds.forEach((r) => {
+    r.holes.forEach((h) => {
+      if (h.score && !isNaN(Number(h.score))) nine9ScoreCounts[classifyScore(Number(h.score), h.par)]++;
+    });
+  });
+
+  const filteredCourses = courses.filter((c) =>
+    c.name.toLowerCase().includes(courseName.toLowerCase())
+  );
+
+  // ── ACHIEVEMENTS ─────────────────────────────────────────────
+  const totalRounds = roundHistory.length; // All rounds count toward participation achievements
+  const allScores = fullRoundHistory.map((r) => r.total);
+  const allToPar = fullRoundHistory.map((r) => r.toPar);
+
+  // Pre-compute complex checks
+  const hasBirdieStreak = roundHistory.some((r) => {
+    for (let i = 0; i < r.holes.length - 1; i++) {
+      if ((r.holes[i].score - r.holes[i].par) === -1 && (r.holes[i+1].score - r.holes[i+1].par) === -1) return true;
+    }
+    return false;
+  });
+  const hasComeback = fullRoundHistory.some((r) => {
+    const front = r.holes.filter((h) => h.hole <= 9).reduce((s, h) => s + (h.score - h.par), 0);
+    const back = r.holes.filter((h) => h.hole > 9).reduce((s, h) => s + (h.score - h.par), 0);
+    return (front - back) >= 5;
+  });
+  const hasParStreak9 = fullRoundHistory.some((r) => {
+    let streak = 0;
+    for (const h of r.holes) {
+      if (h.score <= h.par) { streak++; if (streak >= 9) return true; } else streak = 0;
+    }
+    return false;
+  });
+  const hasAllPar3Birdies = fullRoundHistory.some((r) => {
+    const par3s = r.holes.filter((h) => h.par === 3);
+    return par3s.length > 0 && par3s.every((h) => h.score <= h.par - 1);
+  });
+  const hasEagleOnPar5 = fullRoundHistory.some((r) =>
+    r.holes.some((h) => h.par === 5 && h.score <= h.par - 2)
+  );
+  const hasPerfectStorm = fullRoundHistory.some((r) =>
+    r.holes.every((h) => h.score <= h.par)
+  );
+  const has5BirdiesRound = fullRoundHistory.some((r) =>
+    r.holes.filter((h) => (h.score - h.par) <= -1).length >= 5
+  );
+  // Marathon Master: 2 full rounds on same date under 200 combined
+  const roundsByDate = {};
+  fullRoundHistory.forEach((r) => {
+    if (!roundsByDate[r.date]) roundsByDate[r.date] = [];
+    roundsByDate[r.date].push(r.total);
+  });
+  const hasMarathon = Object.values(roundsByDate).some((scores) => {
+    if (scores.length < 2) return false;
+    scores.sort((a, b) => a - b);
+    return scores[0] + scores[1] < 200;
+  });
+  const ACHIEVEMENTS = [
+    // Scoring milestones
+    { id: "break100",  icon: "💯", label: "Break 100",       desc: "Shoot under 100 in a full round",                 unlocked: allScores.some((s) => s < 100),       tier: "bronze"  },
+    { id: "break90",   icon: "9️⃣",  label: "Break 90",        desc: "Shoot under 90 in a full round",                  unlocked: allScores.some((s) => s < 90),        tier: "silver"  },
+    { id: "break80",   icon: "8️⃣",  label: "Break 80",        desc: "Shoot under 80 in a full round",                  unlocked: allScores.some((s) => s < 80),        tier: "gold"    },
+    { id: "break70",   icon: "7️⃣",  label: "Break 70",        desc: "Shoot under 70 in a full round",                  unlocked: allScores.some((s) => s < 70),        tier: "diamond" },
+    { id: "even",      icon: "🎯", label: "Even Par",        desc: "Finish a full round at even par or better",        unlocked: allToPar.some((t) => t <= 0),         tier: "gold"    },
+    { id: "parfect",   icon: "🌪️", label: "Par-fect Storm",  desc: "Shoot even par or better on every hole in a round", unlocked: hasPerfectStorm,                    tier: "diamond" },
+    // Score type milestones
+    { id: "firstBirdie",   icon: "🐦", label: "First Birdie",     desc: "Record your first birdie",                               unlocked: scoreCounts.birdie > 0,     tier: "bronze"  },
+    { id: "5birdies",      icon: "🐦", label: "Birdie Machine",   desc: "Record 5+ birdies all-time",                             unlocked: scoreCounts.birdie >= 5,    tier: "silver"  },
+    { id: "birdieBlitz",   icon: "⚡", label: "Birdie Blitz",     desc: "5+ birdies in a single round — the fairway fears you",   unlocked: has5BirdiesRound,           tier: "gold"    },
+    { id: "allBirdie3",    icon: "🎱", label: "All-Birdie Barrage", desc: "Birdie every par 3 on the course in one round",       unlocked: hasAllPar3Birdies,          tier: "gold"    },
+    { id: "eaglePar5",     icon: "🦅", label: "Eagle Eye",        desc: "Land an eagle or better on a par 5 — beast mode!",       unlocked: hasEagleOnPar5,             tier: "gold"    },
+    { id: "firstAce",      icon: "🏆", label: "Hole in One!",     desc: "Record an ace — the golf gods have smiled upon you",     unlocked: scoreCounts.ace > 0,        tier: "diamond" },
+    { id: "noDoubles",     icon: "✨", label: "Clean Card",       desc: "A round with no double bogeys or worse",                 unlocked: fullRoundHistory.some((r) => r.holes.every((h) => (h.score - h.par) <= 1)), tier: "silver" },
+    { id: "bogeyBuster",   icon: "🔒", label: "Bogey Buster",     desc: "Complete 18 holes with zero bogeys — par is your playground", unlocked: fullRoundHistory.some((r) => r.holes.every((h) => h.score <= h.par)), tier: "gold" },
+    { id: "3birdiesRound", icon: "🎪", label: "Hat Trick",        desc: "3+ birdies in a single round",                          unlocked: fullRoundHistory.some((r) => r.holes.filter((h) => (h.score - h.par) === -1).length >= 3), tier: "silver" },
+    // Consistency milestones
+    { id: "5rounds",   icon: "📅", label: "Getting Started", desc: "Complete 5 full rounds",   unlocked: totalRounds >= 5,  tier: "bronze"  },
+    { id: "10rounds",  icon: "📅", label: "Regular",         desc: "Complete 10 full rounds",  unlocked: totalRounds >= 10, tier: "silver"  },
+    { id: "25rounds",  icon: "📅", label: "Dedicated",       desc: "Complete 25 full rounds",  unlocked: totalRounds >= 25, tier: "gold"    },
+    { id: "50rounds",  icon: "📅", label: "Grinder",         desc: "Complete 50 full rounds",  unlocked: totalRounds >= 50, tier: "diamond" },
+    { id: "marathon",  icon: "🏃", label: "Marathon Master", desc: "Play 36 holes in one day under 200 total strokes — endurance legend!", unlocked: hasMarathon, tier: "gold" },
+    // Fun / quirky
+    { id: "hotStreak",  icon: "🔥", label: "Hot Streak",     desc: "2 birdies in a row in any round",                     unlocked: hasBirdieStreak,                         tier: "silver" },
+    { id: "comeback",   icon: "💪", label: "Back Nine Boss",  desc: "Back 9 at least 5 shots better than front 9 — epic comeback!", unlocked: hasComeback,              tier: "silver" },
+    { id: "parMachine", icon: "⛳", label: "Par Machine",     desc: "Make par or better on 9 consecutive holes in a round", unlocked: hasParStreak9,                          tier: "gold"   },
+    { id: "lowFront9",  icon: "🌅", label: "Fast Starter",    desc: "Shoot even par or better on the front 9",             unlocked: front9Scores.some((r) => r.toPar <= 0), tier: "gold"   },
+    { id: "lowBack9",   icon: "🌇", label: "Closer",          desc: "Shoot even par or better on the back 9",              unlocked: back9Scores.some((r) => r.toPar <= 0),  tier: "gold"   },
+  ];
+
+  const unlockedCount = ACHIEVEMENTS.filter((a) => a.unlocked).length;
+  const TIER_COLORS = { bronze: "#cd7f32", silver: "#c0c0c0", gold: "#FFD700", diamond: "#60a5fa" };
+  const TIER_BG = { bronze: "rgba(205,127,50,0.12)", silver: "rgba(192,192,192,0.08)", gold: "rgba(255,215,0,0.1)", diamond: "rgba(96,165,250,0.1)" };
+
+  const navItems = [["dashboard","📊 Dashboard"],["new-round","⛳ Play"],["history","📋 History"],["courses","🏌️ Courses"],["achievements","🏅 Achievements"]];
+
+  if (inRound) {
+    return (
+      <ActiveRoundTracker
+        holes={holes} setHoles={setHoles}
+        courseName={courseName} roundDate={roundDate}
+        onFinish={finishRound} onCancel={cancelRound}
+      />
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(160deg, #0a1a0f 0%, #0d2318 40%, #071510 100%)", fontFamily: "'Georgia', serif", color: "#e8f0e9" }}>
+      <div style={{ borderBottom: "1px solid rgba(74,222,128,0.15)", background: "rgba(0,0,0,0.3)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 100 }}>
+        <div style={{ maxWidth: 920, margin: "0 auto", padding: "8px 16px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: "1.3rem" }}>⛳</span>
+            <span style={{ fontSize: "1.1rem", fontWeight: 700, color: "#4ade80" }}>Caddie</span>
+          </div>
+          <nav style={{ display: "flex" }}>
+            {navItems.map(([v, label]) => (
+              <button key={v} onClick={() => { setView(v); setActiveRound(null); if (v !== "new-round") setSetupMode("pick"); }} style={{
+                flex: 1,
+                background: "transparent",
+                border: "none",
+                borderBottom: view === v ? "2px solid #4ade80" : "2px solid transparent",
+                color: view === v ? "#4ade80" : "#6b7280",
+                padding: "6px 2px", cursor: "pointer", whiteSpace: "nowrap",
+                fontSize: "0.7rem", fontFamily: "inherit", transition: "all 0.2s",
+                textAlign: "center",
+              }}>{label}</button>
+            ))}
+          </nav>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 920, margin: "0 auto", padding: "32px 24px" }}>
+
+        {/* ── DASHBOARD ── */}
+        {view === "dashboard" && (
+          <div>
+            <h2 style={{ fontSize: "1.8rem", fontWeight: 700, marginBottom: 6, color: "#f0fdf4" }}>Your Stats</h2>
+            <p style={{ color: "#6b7280", marginBottom: 24, fontSize: "0.9rem" }}>
+              {rounds.length === 0 ? "No rounds yet — hit Play to start tracking." : `${fullRoundHistory.length} full round${fullRoundHistory.length !== 1 ? "s" : ""} · ${nineHoleRounds.length + roundHistory.filter(r => r.holesPlayed > 0 && r.holesPlayed !== 18 && r.holesPlayed !== 9).length} partial`}
+            </p>
+
+            {/* ── Career highlights banner ── */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 32 }}>
+              {[
+                { icon: "🏆", label: "Aces", value: scoreCounts.ace, color: "#FFD700", bg: "rgba(255,215,0,0.08)", border: "rgba(255,215,0,0.25)" },
+                { icon: "🦅", label: "Eagles", value: scoreCounts.eagle, color: "#A855F7", bg: "rgba(168,85,247,0.08)", border: "rgba(168,85,247,0.25)" },
+                { icon: "🐦", label: "Birdies", value: scoreCounts.birdie, color: "#22C55E", bg: "rgba(34,197,94,0.08)", border: "rgba(34,197,94,0.25)" },
+              ].map(({ icon, label, value, color, bg, border }) => (
+                <div key={label} style={{ flex: 1, background: bg, border: `1px solid ${border}`, borderRadius: 16, padding: "16px 12px", textAlign: "center" }}>
+                  <div style={{ fontSize: "1.6rem", marginBottom: 4 }}>{icon}</div>
+                  <div style={{ fontSize: "2rem", fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                  <div style={{ fontSize: "0.68rem", color: "#9ca3af", marginTop: 5, textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* ── 18-hole stats ── */}
+            <div style={{ fontSize: "0.72rem", color: "#4ade80", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12, fontWeight: 600 }}>18-Hole Rounds</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 32 }}>
+              {[
+                { label: "Handicap", value: handicap !== null ? (Number(handicap) > 0 ? `+${handicap}` : handicap) : "—", sub: "differential avg" },
+                { label: "Avg Score", value: avgScore ?? "—", sub: "18-hole rounds" },
+                { label: "Best Round", value: bestRound ? (bestRound.toPar === 0 ? "E" : bestRound.toPar > 0 ? `+${bestRound.toPar}` : bestRound.toPar) : "—", sub: bestRound?.course ?? "" },
+                { label: "Full Rounds", value: fullRoundHistory.length, sub: "tracked" },
+              ].map((c) => (
+                <div key={c.label} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(74,222,128,0.1)", borderRadius: 14, padding: "18px 16px", textAlign: "center" }}>
+                  <div style={{ fontSize: "2rem", fontWeight: 800, color: "#4ade80", lineHeight: 1 }}>{c.value}</div>
+                  <div style={{ fontSize: "0.7rem", color: "#9ca3af", marginTop: 6, textTransform: "uppercase", letterSpacing: "0.08em" }}>{c.label}</div>
+                  <div style={{ fontSize: "0.68rem", color: "#4b5563", marginTop: 2 }}>{c.sub}</div>
+                </div>
+              ))}
+            </div>
+            {fullRoundHistory.length > 0 && (
+              <>
+                <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(74,222,128,0.08)", borderRadius: 16, padding: 24, marginBottom: 24 }}>
+                  <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: 20, color: "#d1fae5" }}>Score Distribution</h3>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    {Object.entries(scoreCounts).map(([key, count]) => (
+                      <div key={key} style={{ flex: "1 1 80px", background: `${SCORE_COLORS[key]}18`, border: `1px solid ${SCORE_COLORS[key]}44`, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                        <div style={{ fontSize: "1.5rem", fontWeight: 800, color: SCORE_COLORS[key] }}>{count}</div>
+                        <div style={{ fontSize: "0.62rem", color: "#9ca3af", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>{SCORE_EMOJI[key]}{SCORE_LABELS[key]}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {historyChartData.length > 1 && (
+                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(74,222,128,0.08)", borderRadius: 16, padding: 24, marginBottom: 24 }}>
+                    <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: 20, color: "#d1fae5" }}>Score Trend</h3>
+                    <ResponsiveContainer width="100%" height={180}>
+                      <LineChart data={historyChartData}>
+                        <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} axisLine={false} tickLine={false} />
+                        <Tooltip contentStyle={{ background: "#0d2318", border: "1px solid #4ade8044", borderRadius: 8, color: "#e8f0e9", fontSize: "0.8rem" }} labelFormatter={(l, p) => p?.[0]?.payload?.course || l} />
+                        <Line type="monotone" dataKey="score" stroke="#4ade80" strokeWidth={2.5} dot={{ fill: "#4ade80", r: 4 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+              </>
+            )}
+
+            {/* ── 9-hole stats ── */}
+            <div style={{ marginTop: 40, marginBottom: 12 }}>
+              <div style={{ fontSize: "0.72rem", color: "#60a5fa", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>9-Hole Rounds</div>
+              <p style={{ color: "#4b5563", fontSize: "0.78rem", marginTop: 4 }}>
+                {all9Entries.length === 0 ? "Includes partial rounds (9+ holes) and front/back splits from full rounds" : `${nineHoleRounds.length} partial round${nineHoleRounds.length !== 1 ? "s" : ""} (9+ holes) · front/back splits from ${fullRoundHistory.length} full round${fullRoundHistory.length !== 1 ? "s" : ""}`}
+              </p>
+            </div>
+            {all9Entries.length > 0 ? (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 28 }}>
+                  {[
+                    { label: "Best 9", value: best9 ? (best9.toPar === 0 ? "E" : best9.toPar > 0 ? `+${best9.toPar}` : best9.toPar) : "—", sub: best9 ? `${best9.nine} · ${best9.course}` : "" },
+                    { label: "Avg 9-Hole", value: avg9Score ?? "—", sub: "per 9 holes" },
+                    { label: "9s Tracked", value: all9Entries.length, sub: `${nineHoleRounds.length} standalone` },
+                  ].map((c) => (
+                    <div key={c.label} style={{ background: "rgba(96,165,250,0.06)", border: "1px solid rgba(96,165,250,0.15)", borderRadius: 14, padding: "18px 16px", textAlign: "center" }}>
+                      <div style={{ fontSize: "2rem", fontWeight: 800, color: "#60a5fa", lineHeight: 1 }}>{c.value}</div>
+                      <div style={{ fontSize: "0.7rem", color: "#9ca3af", marginTop: 6, textTransform: "uppercase", letterSpacing: "0.08em" }}>{c.label}</div>
+                      <div style={{ fontSize: "0.68rem", color: "#4b5563", marginTop: 2, maxWidth: 120, margin: "2px auto 0" }}>{c.sub}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Front vs Back 9 comparison from full rounds */}
+                {fullRoundHistory.length > 0 && (() => {
+                  const avgFront = front9Scores.length ? (front9Scores.reduce((s, r) => s + r.score, 0) / front9Scores.length).toFixed(1) : null;
+                  const avgBack = back9Scores.length ? (back9Scores.reduce((s, r) => s + r.score, 0) / back9Scores.length).toFixed(1) : null;
+                  const avgFrontToPar = front9Scores.length ? (front9Scores.reduce((s, r) => s + r.toPar, 0) / front9Scores.length).toFixed(1) : null;
+                  const avgBackToPar = back9Scores.length ? (back9Scores.reduce((s, r) => s + r.toPar, 0) / back9Scores.length).toFixed(1) : null;
+                  const bestFront = front9Scores.length ? front9Scores.reduce((a, b) => a.toPar < b.toPar ? a : b) : null;
+                  const bestBack = back9Scores.length ? back9Scores.reduce((a, b) => a.toPar < b.toPar ? a : b) : null;
+                  return (
+                    <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(96,165,250,0.1)", borderRadius: 16, padding: 24, marginBottom: 24 }}>
+                      <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: 20, color: "#bfdbfe" }}>Front 9 vs Back 9</h3>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        {[
+                          { label: "Front 9", avg: avgFront, avgToPar: avgFrontToPar, best: bestFront },
+                          { label: "Back 9", avg: avgBack, avgToPar: avgBackToPar, best: bestBack },
+                        ].map(({ label, avg, avgToPar, best }) => (
+                          <div key={label} style={{ background: "rgba(96,165,250,0.05)", borderRadius: 12, padding: "16px" }}>
+                            <div style={{ fontSize: "0.75rem", color: "#60a5fa", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, marginBottom: 12 }}>{label}</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                <span style={{ fontSize: "0.78rem", color: "#6b7280" }}>Avg Score</span>
+                                <span style={{ fontSize: "0.82rem", color: "#e8f0e9", fontWeight: 700 }}>{avg ?? "—"}</span>
+                              </div>
+                              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                <span style={{ fontSize: "0.78rem", color: "#6b7280" }}>Avg To Par</span>
+                                <span style={{ fontSize: "0.82rem", fontWeight: 700, color: avgToPar < 0 ? "#4ade80" : avgToPar > 0 ? "#f97316" : "#9ca3af" }}>
+                                  {avgToPar ? (avgToPar > 0 ? `+${avgToPar}` : avgToPar) : "—"}
+                                </span>
+                              </div>
+                              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                <span style={{ fontSize: "0.78rem", color: "#6b7280" }}>Best</span>
+                                <span style={{ fontSize: "0.82rem", fontWeight: 700, color: best ? (best.toPar < 0 ? "#4ade80" : best.toPar > 0 ? "#f97316" : "#9ca3af") : "#4b5563" }}>
+                                  {best ? (best.toPar === 0 ? "E" : best.toPar > 0 ? `+${best.toPar}` : best.toPar) : "—"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            ) : (
+              <div style={{ background: "rgba(96,165,250,0.04)", border: "1px solid rgba(96,165,250,0.1)", borderRadius: 14, padding: "28px 24px", textAlign: "center", color: "#4b5563", fontSize: "0.85rem" }}>
+                Play a 9-hole round or complete a full round to see 9-hole stats
+              </div>
+            )}
+
+            {rounds.length === 0 && (
+              <div style={{ textAlign: "center", padding: "60px 0" }}>
+                <div style={{ fontSize: "4rem", marginBottom: 16 }}>⛳</div>
+                <p style={{ color: "#4b5563" }}>Add your first round to get started</p>
+                <button onClick={() => setView("new-round")} style={{ marginTop: 20, background: "#4ade80", color: "#0a1a0f", border: "none", padding: "10px 28px", borderRadius: 10, fontFamily: "inherit", fontWeight: 700, fontSize: "0.9rem", cursor: "pointer" }}>Start a Round</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── PLAY / SETUP ── */}
+        {view === "new-round" && (
+          <div>
+            <h2 style={{ fontSize: "1.8rem", fontWeight: 700, marginBottom: 6, color: "#f0fdf4" }}>Set Up Round</h2>
+            <p style={{ color: "#6b7280", marginBottom: 24, fontSize: "0.9rem" }}>Select a course and confirm pars, then start playing</p>
+
+            {/* Date picker */}
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ fontSize: "0.72rem", color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Date</div>
+              <input type="date" value={roundDate} onChange={(e) => setRoundDate(e.target.value)} style={{ ...inputStyle, maxWidth: 200 }} />
+            </div>
+
+            {/* Course selection */}
+            {setupMode === "pick" ? (
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ fontSize: "0.72rem", color: "#6b7280", marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.06em" }}>Select Course</div>
+                {courses.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                    {courses.map((c) => {
+                      const tp = c.holes.reduce((s, h) => s + h.par, 0);
+                      const isSelected = courseName === c.name;
+                      return (
+                        <div key={c.id}
+                          onClick={() => loadCourse(c)}
+                          style={{
+                            padding: "14px 18px", borderRadius: 12, cursor: "pointer",
+                            background: isSelected ? "rgba(74,222,128,0.12)" : "rgba(255,255,255,0.04)",
+                            border: `1px solid ${isSelected ? "rgba(74,222,128,0.5)" : "rgba(255,255,255,0.08)"}`,
+                            display: "flex", justifyContent: "space-between", alignItems: "center",
+                            transition: "all 0.15s",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            {isSelected && <span style={{ color: "#4ade80" }}>✓</span>}
+                            <span style={{ color: isSelected ? "#4ade80" : "#d1fae5", fontWeight: isSelected ? 700 : 400 }}>{c.name}</span>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ color: "#6b7280", fontSize: "0.8rem" }}>Par {tp} · {c.holes.length} holes</div>
+                            {c.location && <div style={{ color: "#4b5563", fontSize: "0.7rem" }}>📍 {c.location}</div>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ color: "#4b5563", fontSize: "0.85rem", marginBottom: 16 }}>No saved courses yet.</div>
+                )}
+                <button
+                  onClick={() => { setCourseName(""); setCourseLocation(""); setHoles(defaultHoles); setNewCourseHoles(18); setSetupMode("new"); }}
+                  style={{ background: "transparent", border: "1px dashed rgba(74,222,128,0.3)", color: "#4ade80", padding: "10px 20px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit", fontSize: "0.85rem", width: "100%" }}
+                >
+                  + Add New Course
+                </button>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                  <button onClick={() => setSetupMode("pick")} style={{ background: "transparent", border: "none", color: "#4ade80", cursor: "pointer", fontFamily: "inherit", fontSize: "0.85rem", padding: 0 }}>← Back</button>
+                  <div style={{ fontSize: "0.72rem", color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>New Course</div>
+                </div>
+                <input
+                  value={courseName}
+                  onChange={(e) => { setCourseName(e.target.value); setCourseSaved(false); }}
+                  placeholder="Course name..."
+                  style={{ ...inputStyle, width: "100%", boxSizing: "border-box", marginBottom: 10 }}
+                />
+                <input
+                  value={courseLocation}
+                  onChange={(e) => { setCourseLocation(e.target.value); setCourseSaved(false); }}
+                  placeholder="Location (city, state)..."
+                  style={{ ...inputStyle, width: "100%", boxSizing: "border-box", marginBottom: 14 }}
+                />
+                {/* Hole count toggle */}
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: "0.68rem", color: "#6b7280", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>Holes</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {[9, 18].map((n) => (
+                      <button key={n} onClick={() => {
+                        setNewCourseHoles(n);
+                        setHoles(n === 9 ? default9Holes : defaultHoles);
+                      }} style={{
+                        flex: 1, padding: "10px", borderRadius: 10,
+                        background: newCourseHoles === n ? "rgba(74,222,128,0.15)" : "rgba(255,255,255,0.04)",
+                        border: `1px solid ${newCourseHoles === n ? "rgba(74,222,128,0.5)" : "rgba(255,255,255,0.1)"}`,
+                        color: newCourseHoles === n ? "#4ade80" : "#6b7280",
+                        fontFamily: "inherit", fontSize: "0.9rem", fontWeight: newCourseHoles === n ? 700 : 400,
+                        cursor: "pointer",
+                      }}>{n} Holes</button>
+                    ))}
+                  </div>
+                </div>
+                {courseName.trim() && (
+                  <button onClick={saveCurrentCourse} style={{ background: courseSaved ? "#22c55e" : "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", color: courseSaved ? "#fff" : "#4ade80", padding: "6px 16px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.8rem", fontWeight: 600 }}>
+                    {courseSaved ? "✓ Saved!" : "Save Course"}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Selected course indicator */}
+            {courseName.trim() && (
+              <div style={{ marginBottom: 16, padding: "8px 14px", background: "rgba(74,222,128,0.06)", border: "1px solid rgba(74,222,128,0.15)", borderRadius: 10 }}>
+                <span style={{ fontSize: "0.82rem", color: "#4ade80" }}>⛳ <strong>{courseName}</strong></span>
+              </div>
+            )}
+
+            {/* Par setup grid — plain, no color coding */}
+            <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(74,222,128,0.1)", borderRadius: 16, padding: "16px 20px", marginBottom: 24 }}>
+              <div style={{ fontSize: "0.72rem", color: "#6b7280", marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                Confirm Pars — Par {holes.reduce((s, h) => s + h.par, 0)}
+              </div>
+              {[holes.slice(0, 9), holes.slice(9, 18)].filter(nine => nine.length > 0).map((nine, ni) => (
+                <div key={ni} style={{ marginBottom: ni === 0 && holes.length > 9 ? 20 : 0 }}>
+                  <div style={{ fontSize: "0.65rem", color: "#4b5563", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>{holes.length > 9 ? (ni === 0 ? "Front 9" : "Back 9") : "9 Holes"}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+                    {nine.map((h, i) => {
+                      const idx = ni * 9 + i;
+                      return (
+                        <div key={h.hole} style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: "8px 12px" }}>
+                          <span style={{ fontSize: "0.8rem", color: "#6b7280", fontWeight: 600, minWidth: 24 }}>{h.hole}</span>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            min={3} max={5}
+                            value={h.par}
+                            onFocus={(e) => e.target.select()}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              if (!isNaN(val)) {
+                                const u = [...holes];
+                                u[idx] = { ...h, par: Math.min(5, Math.max(3, val)) };
+                                setHoles(u);
+                              }
+                            }}
+                            style={{
+                              flex: 1, background: "rgba(255,255,255,0.08)",
+                              border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8,
+                              color: "#e8f0e9", fontSize: "1.4rem", fontWeight: 700,
+                              fontFamily: "Georgia, serif", textAlign: "center",
+                              padding: "8px 4px", outline: "none", width: "100%",
+                              MozAppearance: "textfield",
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button onClick={startRound} style={{
+              width: "100%", padding: "18px", borderRadius: 14,
+              background: "linear-gradient(135deg, #4ade80, #16a34a)", border: "none",
+              color: "#0a1a0f", fontFamily: "inherit", fontSize: "1.15rem", fontWeight: 800,
+              cursor: "pointer", boxShadow: "0 4px 24px rgba(74,222,128,0.25)",
+            }}>⛳ Start Round</button>
+          </div>
+        )}
+
+        {/* ── COURSE LIBRARY ── */}
+        {view === "courses" && (
+          <div>
+            <h2 style={{ fontSize: "1.8rem", fontWeight: 700, marginBottom: 6, color: "#f0fdf4" }}>Course Library</h2>
+            <p style={{ color: "#6b7280", marginBottom: 28, fontSize: "0.9rem" }}>{courses.length} saved course{courses.length !== 1 ? "s" : ""}</p>
+            {courses.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "60px 0" }}>
+                <div style={{ fontSize: "3rem", marginBottom: 12 }}>🏌️</div>
+                <p style={{ color: "#4b5563" }}>No courses yet. They'll appear here after your first round.</p>
+                <button onClick={() => setView("new-round")} style={{ marginTop: 16, background: "#4ade80", color: "#0a1a0f", border: "none", padding: "9px 24px", borderRadius: 10, fontFamily: "inherit", fontWeight: 700, fontSize: "0.85rem", cursor: "pointer" }}>Start a Round</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {courses.map((course) => {
+                  const totalPar = course.holes.reduce((s, h) => s + h.par, 0);
+                  const isEditing = editingCourseId === course.id;
+                  return (
+                    <div key={course.id} style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${isEditing ? "rgba(74,222,128,0.35)" : "rgba(74,222,128,0.1)"}`, borderRadius: 16, overflow: "hidden" }}>
+                      <div style={{ padding: "16px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: "1.05rem", color: "#d1fae5" }}>{course.name}</div>
+                          <div style={{ fontSize: "0.76rem", color: "#6b7280", marginTop: 3 }}>
+                            Par {totalPar} · {course.holes.filter((h) => h.par === 3).length} par 3s · {course.holes.filter((h) => h.par === 4).length} par 4s · {course.holes.filter((h) => h.par === 5).length} par 5s
+                          </div>
+                          {course.location && <div style={{ fontSize: "0.74rem", color: "#4b5563", marginTop: 2 }}>📍 {course.location}</div>}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => { setView("new-round"); loadCourse(course); }} style={{ background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.25)", color: "#4ade80", padding: "5px 14px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.78rem" }}>Play →</button>
+                          <button onClick={() => setEditingCourseId(isEditing ? null : course.id)} style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "#9ca3af", padding: "5px 14px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.78rem" }}>{isEditing ? "Done" : "Edit"}</button>
+                          <button onClick={() => deleteCourse(course.id)} style={{ background: "transparent", border: "1px solid #7f1d1d44", color: "#ef4444", padding: "5px 14px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.78rem" }}>Delete</button>
+                        </div>
+                      </div>
+                      <div style={{ padding: "0 22px 16px" }}>
+                        {[course.holes.slice(0,9), course.holes.slice(9,18)].map((nine, ni) => (
+                          <div key={ni} style={{ display: "grid", gridTemplateColumns: "repeat(9, 1fr)", gap: 4, marginBottom: ni === 0 ? 6 : 0 }}>
+                            {nine.map((h) => (
+                              <div key={h.hole} style={{ textAlign: "center" }}>
+                                <div style={{ fontSize: "0.6rem", color: "#4b5563", marginBottom: 2 }}>{h.hole}</div>
+                                {isEditing ? (
+                                  <input
+                                    type="number"
+                                    inputMode="numeric"
+                                    pattern="[0-9]*"
+                                    min={3} max={5}
+                                    value={h.par}
+                                    onFocus={(e) => e.target.select()}
+                                    onChange={(e) => {
+                                      const val = parseInt(e.target.value, 10);
+                                      if (!isNaN(val)) {
+                                        const updated = course.holes.map((hh) => hh.hole === h.hole ? { ...hh, par: Math.min(5, Math.max(3, val)) } : hh);
+                                        persistCourses(courses.map((c) => c.id === course.id ? { ...c, holes: updated } : c));
+                                      }
+                                    }}
+                                    style={{
+                                      background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.2)",
+                                      borderRadius: 6, color: "#e8f0e9", fontSize: "1rem", fontWeight: 700,
+                                      fontFamily: "Georgia, serif", textAlign: "center", padding: "4px 2px",
+                                      outline: "none", width: "100%", MozAppearance: "textfield",
+                                    }}
+                                  />
+                                ) : (
+                                  <div style={{ fontSize: "0.82rem", color: "#9ca3af", fontWeight: 600, padding: "3px 0" }}>{h.par}</div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                        {isEditing && (
+                          <div style={{ marginTop: 12 }}>
+                            <div style={{ fontSize: "0.68rem", color: "#6b7280", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>Location</div>
+                            <input
+                              value={course.location || ''}
+                              onChange={(e) => persistCourses(courses.map((c) => c.id === course.id ? { ...c, location: e.target.value } : c))}
+                              placeholder="City, state..."
+                              style={{ ...inputStyle, width: "100%", boxSizing: "border-box", fontSize: "0.85rem", padding: "7px 12px" }}
+                            />
+                            <div style={{ marginTop: 6, fontSize: "0.73rem", color: "#4ade80" }}>✓ Changes saved automatically</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── HISTORY ── */}
+        {view === "history" && !activeRound && (
+          <div>
+            <h2 style={{ fontSize: "1.8rem", fontWeight: 700, marginBottom: 6, color: "#f0fdf4" }}>Round History</h2>
+            <p style={{ color: "#6b7280", marginBottom: 28, fontSize: "0.9rem" }}>{rounds.length} round{rounds.length !== 1 ? "s" : ""} logged</p>
+            {rounds.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "60px 0", color: "#4b5563" }}>No rounds yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {roundHistory.map((r) => {
+                  const sc = { ace:0, eagle:0, birdie:0, par:0, bogey:0, double:0, "triple+":0 };
+                  return (
+                    <div key={r.id} onClick={() => { setActiveRound(r); setView("detail"); }} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(74,222,128,0.1)", borderRadius: 14, padding: "18px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, cursor: "pointer" }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: "1rem", color: "#d1fae5" }}>{r.course}</div>
+                        <div style={{ fontSize: "0.78rem", color: "#6b7280", marginTop: 2 }}>{r.date}{(() => {
+                          const total = r.totalHoles ?? (r.holesPlayed === 9 && r.holes.every(h => h.hole <= 9) ? 9 : 18);
+                          if (r.holesPlayed < total) return <span style={{ marginLeft: 8, color: "#f97316", fontSize: "0.72rem" }}>({r.holesPlayed} of {total} holes)</span>;
+                          if (total === 9) return <span style={{ marginLeft: 8, color: "#4b5563", fontSize: "0.72rem" }}>(9 holes)</span>;
+                          return null;
+                        })()}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: "2rem", fontWeight: 800, color: r.toPar < 0 ? "#4ade80" : r.toPar === 0 ? "#9ca3af" : "#f97316" }}>
+                          {r.toPar === 0 ? "E" : r.toPar > 0 ? `+${r.toPar}` : r.toPar}
+                        </div>
+                        <div style={{ fontSize: "0.75rem", color: "#6b7280" }}>Total: {r.total}</div>
+                        <button onClick={(e) => { e.stopPropagation(); deleteRound(r.id); }} style={{ marginTop: 6, background: "transparent", border: "1px solid #7f1d1d44", color: "#ef4444", padding: "3px 10px", borderRadius: 6, fontSize: "0.7rem", cursor: "pointer", fontFamily: "inherit" }}>Delete</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── ROUND DETAIL ── */}
+        {view === "detail" && activeRound && (() => {
+          const displayHoles = editingRound ? editedHoles : activeRound.holes;
+          const totalScore = displayHoles.reduce((s, h) => s + (h.score !== null ? Number(h.score) : 0), 0);
+          const totalPar = displayHoles.reduce((s, h) => s + h.par, 0);
+          return (
+          <div>
+            {/* Header row */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <button onClick={() => { setView("history"); setActiveRound(null); setEditingRound(false); }} style={{ background: "transparent", border: "none", color: "#4ade80", cursor: "pointer", fontFamily: "inherit", fontSize: "0.85rem", padding: 0 }}>← Back</button>
+              {editingRound ? (
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setEditingRound(false)} style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.15)", color: "#9ca3af", padding: "6px 14px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.8rem" }}>Cancel</button>
+                  <button onClick={() => {
+                    const updated = rounds.map((r) => r.id === activeRound.id ? { ...r, holes: editedHoles, holesPlayed: editedHoles.filter(h => h.score !== null).length } : r);
+                    persistRounds(updated);
+                    setActiveRound({ ...activeRound, holes: editedHoles, holesPlayed: editedHoles.filter(h => h.score !== null).length });
+                    setEditingRound(false);
+                  }} style={{ background: "#4ade80", border: "none", color: "#0a1a0f", padding: "6px 16px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.8rem", fontWeight: 700 }}>Save Changes</button>
+                </div>
+              ) : (
+                <button onClick={() => { setEditedHoles([...activeRound.holes]); setEditingRound(true); }} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", color: "#9ca3af", padding: "6px 16px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", fontSize: "0.8rem" }}>✏️ Edit</button>
+              )}
+            </div>
+
+            <h2 style={{ fontSize: "1.6rem", fontWeight: 700, color: "#f0fdf4" }}>{activeRound.course}</h2>
+            <p style={{ color: "#6b7280", marginBottom: 24 }}>
+              {activeRound.date}
+              {(() => {
+                const played = activeRound.holesPlayed ?? activeRound.holes.length;
+                const total = activeRound.totalHoles ?? (played === 9 && activeRound.holes.every(h => h.hole <= 9) ? 9 : 18);
+                return played < total ? <span style={{ marginLeft: 10, color: "#f97316", fontSize: "0.82rem" }}>· {played} of {total} holes played</span> : null;
+              })()}
+            </p>
+
+            {/* Scorecard legend (hide in edit mode) */}
+            {!editingRound && (
+              <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+                {[
+                  { score: 1, par: 2, label: "Ace" },
+                  { score: 2, par: 4, label: "Eagle" },
+                  { score: 3, par: 4, label: "Birdie" },
+                  { score: 4, par: 4, label: "Par" },
+                  { score: 5, par: 4, label: "Bogey" },
+                  { score: 6, par: 4, label: "Double" },
+                ].map(({ score, par, label }) => (
+                  <div key={label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <ScoreSymbol score={score} par={par} size={20} showScore={false} />
+                    <span style={{ fontSize: "0.68rem", color: "#6b7280" }}>{label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {editingRound && (
+              <div style={{ marginBottom: 16, padding: "8px 14px", background: "rgba(96,165,250,0.08)", border: "1px solid rgba(96,165,250,0.2)", borderRadius: 10 }}>
+                <span style={{ fontSize: "0.8rem", color: "#93c5fd" }}>✏️ Tap any score to edit it</span>
+              </div>
+            )}
+
+            <div style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${editingRound ? "rgba(96,165,250,0.25)" : "rgba(74,222,128,0.1)"}`, borderRadius: 16, overflow: "hidden" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "46px 50px 1fr 1fr", padding: "10px 16px", background: editingRound ? "rgba(96,165,250,0.08)" : "rgba(74,222,128,0.08)", fontSize: "0.7rem", color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", gap: 8 }}>
+                <span>Hole</span><span>Par</span><span>Score</span><span>{editingRound ? "New Score" : "Result"}</span>
+              </div>
+              {displayHoles.map((h, i) => {
+                const score = h.score !== null ? Number(h.score) : null;
+                const type = score !== null ? classifyScore(score, h.par) : null;
+                return (
+                  <div key={h.hole} style={{ display: "grid", gridTemplateColumns: "46px 50px 1fr 1fr", padding: "6px 16px", gap: 8, alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.04)", background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)" }}>
+                    <span style={{ color: "#6b7280", fontSize: "0.84rem", fontWeight: 600 }}>{h.hole}</span>
+                    <span style={{ color: "#4b5563", fontSize: "0.84rem" }}>{h.par}</span>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      {score !== null ? <ScoreSymbol score={score} par={h.par} size={32} showScore={true} /> : <span style={{ color: "#374151", fontSize: "0.78rem" }}>—</span>}
+                    </div>
+                    {editingRound ? (
+                      <div style={{ display: "flex", gap: 4 }}>
+                        {[h.par - 2, h.par - 1, h.par, h.par + 1, h.par + 2].filter(v => v >= 1).map((v) => {
+                          const isSelected = score === v;
+                          const t = classifyScore(v, h.par);
+                          return (
+                            <button key={v} onClick={() => {
+                              const updated = [...editedHoles];
+                              updated[i] = { ...updated[i], score: isSelected ? null : v };
+                              setEditedHoles(updated);
+                            }} style={{
+                              width: 30, height: 30, borderRadius: 6, padding: 0, border: isSelected ? `2px solid ${SCORE_COLORS[t]}` : "1px solid rgba(255,255,255,0.1)",
+                              background: isSelected ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.03)",
+                              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                            }}>
+                              <ScoreSymbol score={v} par={h.par} size={22} showScore={true} />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      type ? <ScoreBadge type={type} /> : null
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{ padding: "14px 16px", borderTop: `1px solid ${editingRound ? "rgba(96,165,250,0.2)" : "rgba(74,222,128,0.15)"}`, display: "flex", gap: 24, flexWrap: "wrap" }}>
+                {[["Front 9", displayHoles.slice(0,9)], ["Back 9", displayHoles.slice(9)], ["Total", displayHoles]].map(([label, hs]) => {
+                  const sc = hs.filter(h => h.score !== null).reduce((s, h) => s + Number(h.score), 0);
+                  const par = hs.reduce((s, h) => s + h.par, 0);
+                  const hasScores = hs.some(h => h.score !== null);
+                  return (
+                    <div key={label}>
+                      <span style={{ color: "#6b7280", fontSize: "0.75rem" }}>{label}: </span>
+                      <span style={{ color: hasScores ? (sc - par <= 0 ? "#4ade80" : "#f97316") : "#4b5563", fontWeight: 700 }}>{hasScores ? sc : "—"}</span>
+                      {hasScores && <span style={{ color: "#4b5563", fontSize: "0.75rem" }}> (par {par})</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          );
+        })()}
+        {/* ── ACHIEVEMENTS ── */}
+        {view === "achievements" && (
+          <div>
+            <h2 style={{ fontSize: "1.8rem", fontWeight: 700, marginBottom: 6, color: "#f0fdf4" }}>Achievements</h2>
+            <p style={{ color: "#6b7280", marginBottom: 20, fontSize: "0.9rem" }}>
+              {unlockedCount} of {ACHIEVEMENTS.length} unlocked
+            </p>
+
+            {/* Progress bar */}
+            <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 999, height: 8, marginBottom: 28, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${(unlockedCount / ACHIEVEMENTS.length) * 100}%`, background: "linear-gradient(90deg, #4ade80, #FFD700)", borderRadius: 999, transition: "width 0.6s ease" }} />
+            </div>
+
+            {/* Unlocked section at top */}
+            {unlockedCount > 0 && (
+              <div style={{ marginBottom: 36 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                  <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "#4ade80", textTransform: "uppercase", letterSpacing: "0.1em" }}>✅ Unlocked ({unlockedCount})</span>
+                  <div style={{ flex: 1, height: 1, background: "rgba(74,222,128,0.2)" }} />
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
+                  {ACHIEVEMENTS.filter((a) => a.unlocked).map((a) => (
+                    <div key={a.id} style={{
+                      background: TIER_BG[a.tier],
+                      border: `1px solid ${TIER_COLORS[a.tier]}66`,
+                      borderRadius: 14, padding: "16px 18px",
+                      display: "flex", alignItems: "center", gap: 14,
+                      boxShadow: `0 0 16px ${TIER_COLORS[a.tier]}18`,
+                    }}>
+                      <div style={{ fontSize: "2.2rem", lineHeight: 1, minWidth: 44, textAlign: "center" }}>{a.icon}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "0.88rem", fontWeight: 700, color: TIER_COLORS[a.tier], marginBottom: 3 }}>{a.label}</div>
+                        <div style={{ fontSize: "0.72rem", color: "#9ca3af", lineHeight: 1.4 }}>{a.desc}</div>
+                      </div>
+                      <div style={{ fontSize: "1.1rem", color: TIER_COLORS[a.tier] }}>✓</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Locked section grouped by tier */}
+            {ACHIEVEMENTS.some((a) => !a.unlocked) && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                  <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em" }}>🔒 Locked ({ACHIEVEMENTS.filter((a) => !a.unlocked).length})</span>
+                  <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.06)" }} />
+                </div>
+                {["diamond", "gold", "silver", "bronze"].map((tier) => {
+                  const locked = ACHIEVEMENTS.filter((a) => a.tier === tier && !a.unlocked);
+                  if (locked.length === 0) return null;
+                  const tierLabels = { diamond: "💎 Diamond", gold: "🥇 Gold", silver: "🥈 Silver", bronze: "🥉 Bronze" };
+                  return (
+                    <div key={tier} style={{ marginBottom: 24 }}>
+                      <div style={{ fontSize: "0.68rem", color: TIER_COLORS[tier], textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, opacity: 0.6 }}>{tierLabels[tier]}</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
+                        {locked.map((a) => (
+                          <div key={a.id} style={{
+                            background: "rgba(255,255,255,0.04)",
+                            border: "1px solid rgba(255,255,255,0.1)",
+                            borderRadius: 14, padding: "14px 16px",
+                            display: "flex", alignItems: "center", gap: 12,
+                          }}>
+                            <div style={{ fontSize: "1.8rem", lineHeight: 1, minWidth: 40, textAlign: "center", filter: "grayscale(1) brightness(0.5)" }}>{a.icon}</div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: "0.84rem", fontWeight: 700, color: "#6b7280", marginBottom: 2 }}>{a.label}</div>
+                              <div style={{ fontSize: "0.7rem", color: "#4b5563", lineHeight: 1.4 }}>{a.desc}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {totalRounds === 0 && (
+              <div style={{ textAlign: "center", padding: "40px 0", color: "#4b5563" }}>
+                <p>Play your first round to start earning achievements</p>
+                <button onClick={() => setView("new-round")} style={{ marginTop: 16, background: "#4ade80", color: "#0a1a0f", border: "none", padding: "9px 24px", borderRadius: 10, fontFamily: "inherit", fontWeight: 700, fontSize: "0.85rem", cursor: "pointer" }}>Start a Round</button>
+              </div>
+            )}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+  </script>
+</body>
+</html>
